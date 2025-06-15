@@ -53,18 +53,32 @@ class LiteLLMManager:
     def _load_app_config(self):
         """Loads application configuration from app_config.json."""
         config_path = "app_config.json"
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-                    self.log(f"Loaded application config from {config_path}")
-                    return config
-            except json.JSONDecodeError as e:
-                self.log(f"Error parsing {config_path}: {e}. Using default config.")
-                return {}
-        else:
-            self.log(f"Config file {config_path} not found. Using default config.")
-            return {}
+        if not os.path.exists(config_path):
+            error_msg = (
+                f"Configuration file '{config_path}' not found. "
+                "Please copy 'app_config.json.example' to 'app_config.json' and configure it."
+            )
+            self.log(f"ERROR: {error_msg}")
+            raise FileNotFoundError(error_msg)
+        
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            self.log(f"Loaded application config from {config_path}")
+            
+            # Validate required fields
+            required_fields = ["ollama_base_url", "default_model"]
+            missing_fields = [field for field in required_fields if not config.get(field)]
+            if missing_fields:
+                error_msg = f"Missing required configuration fields: {missing_fields}"
+                self.log(f"ERROR: {error_msg}")
+                raise ValueError(error_msg)
+            
+            return config
+        except json.JSONDecodeError as e:
+            error_msg = f"Error parsing {config_path}: {e}. Please check the JSON syntax."
+            self.log(f"ERROR: {error_msg}")
+            raise ValueError(error_msg)
 
     def _load_ollama_context_limits(self):
         """Loads Ollama model context limits from ollama_context.cfg."""
@@ -73,12 +87,12 @@ class LiteLLMManager:
             try:
                 with open(config_path, 'r') as f:
                     self.ollama_context_limits = json.load(f)
-                    self.log(f"Loaded Ollama context limits from {config_path}")
+                self.log(f"Loaded Ollama context limits from {config_path}")
             except json.JSONDecodeError as e:
-                self.log(f"Error parsing {config_path}: {e}. Context limits will be missing or default to 4096.")
+                self.log(f"Warning: Error parsing {config_path}: {e}. Context limits will default to 4096.")
                 self.ollama_context_limits = {}
         else:
-            self.log(f"Ollama context limits file {config_path} not found. Ensure you run the generation script (generate_ollama_context.sh).")
+            self.log(f"Warning: Ollama context limits file {config_path} not found. Run generate_ollama_context.sh to create it.")
             self.ollama_context_limits = {}
 
     async def refresh_ollama_models(self):
@@ -192,7 +206,7 @@ class LiteLLMManager:
         # Craft a summarization prompt
         summarize_messages = [
             {"role": "system", "content": "You are a concise summarization assistant. Summarize the following text briefly and accurately."},
-            {"role": "user", "content": f"Summarize:\n\n{text_to_summarize}"}
+            {"role": "user", "content": f"Summarize:\\n\\n{text_to_summarize}"}
         ]
 
         payload = {
@@ -225,14 +239,26 @@ class LiteLLMManager:
             return f"Error summarizing: unexpected error - {e}"
 
 
+# Initialize manager with error handling
+try:
+    manager = LiteLLMManager(verbose=True)
+except (FileNotFoundError, ValueError) as e:
+    print(f"\\nFATAL ERROR: {e}")
+    print("\\nPlease ensure:")
+    print("1. Copy 'app_config.json.example' to 'app_config.json'")
+    print("2. Configure the settings in 'app_config.json'")
+    print("3. Make sure Ollama is running")
+    exit(1)
+
 # FastAPI app setup
 app = FastAPI(title="LiteLLM Chat Interface", description="A web interface for interacting with Ollama models.")
-manager = LiteLLMManager(verbose=True)
 
-# Mount static files (HTML, CSS, JS) - assuming they are in a 'static' directory if used like this
-# However, if index.html, style.css, script.js are in the root, this mount might be for other future assets.
-# For the current setup based on provided files, index.html, style.css, script.js are expected in the root.
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Mount static files with error handling
+static_dir = "static"
+if os.path.exists(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+else:
+    print(f"Warning: Static directory '{static_dir}' not found. Static file serving disabled.")
 
 @app.on_event("startup")
 async def startup_event():
@@ -242,9 +268,21 @@ async def startup_event():
 @app.get("/", response_class=HTMLResponse)
 async def read_root():
     """Serve the main HTML page."""
-    # Assuming index.html is in the same directory as main.py
-    with open("static/index.html", "r") as f: 
-        return HTMLResponse(content=f.read())
+    html_file = "static/index.html"
+    if not os.path.exists(html_file):
+        return HTMLResponse(
+            content="<h1>Welcome to LiteLLM Chat Interface</h1><p>Static files not found. Please ensure the static directory exists with index.html.</p>",
+            status_code=200
+        )
+    
+    try:
+        with open(html_file, "r") as f: 
+            return HTMLResponse(content=f.read())
+    except Exception as e:
+        return HTMLResponse(
+            content=f"<h1>Error loading page</h1><p>Could not load index.html: {e}</p>",
+            status_code=500
+        )
 
 @app.get("/config")
 async def get_app_config():
@@ -265,7 +303,7 @@ async def get_models():
     # If a default model is configured and exists, move it to the top of the list
     if manager.default_model and any(m['name'] == manager.default_model for m in models_list):
         models_list.sort(key=lambda x: x['name'] != manager.default_model)
-        
+    
     return models_list
 
 @app.post("/chat", response_model=ChatResponse)
@@ -331,9 +369,11 @@ async def refresh_models():
 
 if __name__ == "__main__":
     import uvicorn
-    # IMPORTANT: Before running this script, ensure:
-    # 1. You have created 'app_config.json' in the same directory.
-    # 2. You have run the 'generate_ollama_context.sh' script to create 'ollama_context.cfg'.
+    print("\\nStarting LiteLLM Chat Interface...")
+    print("Make sure you have:")
+    print("1. Created 'app_config.json' from 'app_config.json.example'")
+    print("2. Configured your Ollama settings")
+    print("3. Ollama is running and accessible")
+    print("4. Run 'generate_ollama_context.sh' for optimal context limits\\n")
+    
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-
