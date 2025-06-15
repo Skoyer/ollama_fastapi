@@ -276,13 +276,14 @@ async def read_root():
         )
     
     try:
-        with open(html_file, "r") as f: 
-            return HTMLResponse(content=f.read())
+        with open(html_file, "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read(), media_type="text/html; charset=utf-8")
     except Exception as e:
         return HTMLResponse(
             content=f"<h1>Error loading page</h1><p>Could not load index.html: {e}</p>",
             status_code=500
         )
+
 
 @app.get("/config")
 async def get_app_config():
